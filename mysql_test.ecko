@@ -1,0 +1,13 @@
+# Offline tests, run by `ecko test` (no server needed). The full wire protocol
+# is exercised by example.ecko against a live server; here we lock down the
+# auth scramble, which doesn't need a socket.
+import std.test
+import std.encoding
+import "./main.ecko"
+
+test.case("mysql_native_password matches a known vector", || {
+    # scramble = bytes 0x00..0x13; SHA1(pw) ^ SHA1(scramble + SHA1(SHA1(pw))).
+    scramble = encoding.base64_decode("AAECAwQFBgcICQoLDA0ODxAREhM=")
+    resp = main.native_password("secret", scramble)
+    test.eq(encoding.hex_encode(resp), "21b3ff405f32cbe4aafff291396046ea29fa3a4d")
+})

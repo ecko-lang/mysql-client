@@ -1,0 +1,189 @@
+# mysql - a MySQL/MariaDB client written in pure Ecko.
+#
+# No native client: it speaks the classic protocol over std.net's raw sockets,
+# with mysql_native_password authentication (SHA-1 scramble) built from
+# std.hash + bytes + bitwise. The entrypoint of the `mysql` package; `export`
+# declares its public API.
+
+import std.net
+import std.hash
+
+export { connect, connect_tls, query, close, native_password }
+
+# --- little-endian integers (MySQL is little-endian) -----------------------
+
+fn le16(n) = bytes([n band 255, n shr 8 band 255])
+fn le32(n) = bytes([n band 255, n shr 8 band 255, n shr 16 band 255, n shr 24 band 255])
+fn read_le16(b, off) = b[off] bor b[off + 1] shl 8
+fn read_le24(b, off) = b[off] bor b[off + 1] shl 8 bor b[off + 2] shl 16
+
+fn zeros(n) {
+    mut b = b""
+    mut i = 0
+    while i < n {
+        b = b + b"\x00"
+        i = i + 1
+    }
+    b
+}
+
+# Length-encoded integer -> [value, next_offset]. 0xFB (251) is NULL in row
+# context; here it only appears as a normal length otherwise.
+fn read_lenenc(b, off) {
+    first = b[off]
+    if first < 251 { [first, off + 1] } else {
+        if first == 252 { [read_le16(b, off + 1), off + 3] } else {
+            if first == 253 { [read_le24(b, off + 1), off + 4] } else {
+                # 254: 8-byte; we only read the low 4 (values fit for our use).
+                [read_le24(b, off + 1), off + 9]
+            }
+        }
+    }
+}
+
+# Length-encoded string -> [string, next_offset].
+fn read_lenenc_str(b, off) {
+    r = read_lenenc(b, off)
+    n = r[0]
+    start = r[1]
+    [string(b[start..start + n]), start + n]
+}
+
+# --- packet framing: 3-byte LE length + 1-byte sequence + payload ----------
+
+fn read_packet(sock) {
+    header = net.recv_exact(sock, 4)
+    length = header[0] bor header[1] shl 8 bor header[2] shl 16
+    payload = if length > 0 { net.recv_exact(sock, length) } else { b"" }
+    { seq: header[3], payload: payload }
+}
+
+fn write_packet(sock, seq, payload) {
+    n = len(payload)
+    net.send(sock, bytes([n band 255, n shr 8 band 255, n shr 16 band 255, seq]) + payload)
+}
+
+# An ERR packet (0xFF): 2-byte code, '#' + 5-byte SQLSTATE, then the message.
+fn err_message(payload) {
+    if len(payload) > 9 { string(payload[9..len(payload)]) } else { "mysql error" }
+}
+
+# --- the initial handshake + auth ------------------------------------------
+
+# mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
+fn native_password(password, scramble) {
+    h1 = hash.sha1_bytes(bytes(password))
+    h2 = hash.sha1_bytes(h1)
+    h3 = hash.sha1_bytes(scramble + h2)
+    h1 bxor h3
+}
+
+# Parse the server's Initial Handshake (v10) into { scramble, plugin }.
+fn parse_handshake(payload) {
+    # payload[0] = protocol version (10); then null-terminated server version.
+    mut off = 1
+    while payload[off] != 0 {
+        off = off + 1
+    }
+    off = off + 1  # skip null
+    off = off + 4  # connection id
+    scramble1 = payload[off..off + 8]
+    off = off + 8 + 1  # scramble part 1 + filler
+    off = off + 2  # capability flags (lower)
+    off = off + 1  # character set
+    off = off + 2  # status flags
+    off = off + 2  # capability flags (upper)
+    off = off + 1  # length of auth-plugin-data
+    off = off + 10  # reserved
+    scramble2 = payload[off..off + 12]  # 12 bytes (drops the trailing null)
+    { scramble: scramble1 + scramble2 }
+}
+
+# Capability flags: LONG_PASSWORD | CONNECT_WITH_DB | PROTOCOL_41 |
+# SECURE_CONNECTION | PLUGIN_AUTH | DEPRECATE_EOF.
+fn client_caps() = 1 bor 8 bor 512 bor 32768 bor 524288 bor 16777216
+
+fn send_handshake_response(sock, seq, cfg, scramble) {
+    auth = native_password(cfg.password, scramble)
+    body = le32(client_caps()) + le32(16777215) + bytes([45]) + zeros(23) + bytes(cfg.user) + b"\x00" + bytes([len(auth)]) + auth + bytes(cfg.database) + b"\x00" + bytes("mysql_native_password") + b"\x00"
+    write_packet(sock, seq, body)
+}
+
+fn handshake(sock, cfg) {
+    hs = read_packet(sock)
+    info = parse_handshake(hs.payload)
+    send_handshake_response(sock, hs.seq + 1, cfg, info.scramble)
+    reply = read_packet(sock)
+    marker = reply.payload[0]
+    if marker == 255 { error({ kind: "mysql", message: err_message(reply.payload) }) }
+    # 0x00 = OK (authenticated). Anything else (e.g. auth switch) is unsupported.
+    if marker != 0 { error({ kind: "mysql", message: "unsupported auth handshake (marker " + string(marker) + ")" }) }
+    sock
+}
+
+# connect({ host, port, user, password, database }) -> a connection handle.
+fn connect(cfg) = handshake(net.connect(cfg.host, cfg.port), cfg)
+fn connect_tls(cfg) = handshake(net.connect_tls(cfg.host, cfg.port), cfg)
+fn close(sock) = net.close(sock)
+
+# --- COM_QUERY (0x03) + result set -----------------------------------------
+
+# A column-definition packet: 4 lenenc-strings we skip (catalog/schema/table/
+# org_table), then the column name (the 5th lenenc-string).
+fn column_name(payload) {
+    mut off = 0
+    mut i = 0
+    while i < 4 {
+        off = read_lenenc_str(payload, off)[1]
+        i = i + 1
+    }
+    read_lenenc_str(payload, off)[0]
+}
+
+# A row packet: one lenenc-string per column (0xFB = NULL).
+fn parse_row(payload, cols) {
+    mut off = 0
+    mut row = {}
+    mut i = 0
+    while i < len(cols) {
+        if payload[off] == 251 {
+            row[cols[i]] = null
+            off = off + 1
+        } else {
+            r = read_lenenc_str(payload, off)
+            row[cols[i]] = r[0]
+            off = r[1]
+        }
+        i = i + 1
+    }
+    row
+}
+
+# query(sock, sql) -> a list of row maps (empty for non-SELECT statements).
+fn query(sock, sql) {
+    write_packet(sock, 0, bytes([3]) + bytes(sql))
+    first = read_packet(sock)
+    marker = first.payload[0]
+    if marker == 255 { error({ kind: "mysql", message: err_message(first.payload) }) }
+    if marker == 0 {
+        # OK packet: no result set (INSERT/UPDATE/DDL).
+        []
+    } else {
+        # Column count (lenenc), then that many column-definition packets.
+        n = read_lenenc(first.payload, 0)[0]
+        mut cols = []
+        mut i = 0
+        while i < n {
+            cols = push(cols, column_name(read_packet(sock).payload))
+            i = i + 1
+        }
+        # Rows until an EOF/OK packet (0xFE header, short packet).
+        mut rows = []
+        mut done = false
+        while done == false {
+            pkt = read_packet(sock)
+            if pkt.payload[0] == 254 and len(pkt.payload) < 9 { done = true } else { rows = push(rows, parse_row(pkt.payload, cols)) }
+        }
+        rows
+    }
+}
