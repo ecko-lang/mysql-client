@@ -1,4 +1,4 @@
-# mysql
+# MySQL Client
 
 A MySQL / MariaDB client for [Ecko](https://ecko.sh), written in pure Ecko
 with no native client library. It speaks the classic protocol over `std.net`'s
@@ -8,16 +8,19 @@ scramble) using `std.hash`, `bytes`, and the bitwise operators.
 ## Install
 
 ```bash
-ecko add https://github.com/ecko-sh/mysql-client   # or a local path / release zip
+ecko add https://github.com/ecko-sh/mysql-client
 ```
 
-`ecko add` vendors the package into `./vendor/mysql/` and pins it in
+`ecko add` vendors the package into `./vendor/mysql/` and pins it by SHA-256 in
 `ecko.lock`. Grant it the network capability in your `ecko.json`:
 
 ```json
 {
   "dependencies": {
-    "mysql": { "source": "https://github.com/ecko-sh/mysql-client", "grant": ["net"] }
+    "mysql": {
+      "source": "https://github.com/ecko-sh/mysql-client",
+      "grant": ["net"]
+    }
   }
 }
 ```

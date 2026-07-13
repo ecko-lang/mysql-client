@@ -1,6 +1,6 @@
 {
   "name": "mysql",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "entrypoint": "main.ecko",
   "description": "A MySQL/MariaDB client written in Ecko: classic protocol + mysql_native_password over std.net.",
   "author": "Sean Nieuwoudt <sean@underwulf.com>",
