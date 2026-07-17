@@ -8,8 +8,6 @@
 import std.net
 import std.hash
 
-export { connect, connect_tls, query, close, native_password }
-
 # --- little-endian integers (MySQL is little-endian) -----------------------
 
 fn le16(n) = bytes([n band 255, n shr 8 band 255])
@@ -71,7 +69,7 @@ fn err_message(payload) {
 # --- the initial handshake + auth ------------------------------------------
 
 # mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
-fn native_password(password, scramble) {
+export fn native_password(password, scramble) {
     h1 = hash.sha1_bytes(bytes(password))
     h2 = hash.sha1_bytes(h1)
     h3 = hash.sha1_bytes(scramble + h2)
@@ -105,7 +103,18 @@ fn client_caps() = 1 bor 8 bor 512 bor 32768 bor 524288 bor 16777216
 
 fn send_handshake_response(sock, seq, cfg, scramble) {
     auth = native_password(cfg.password, scramble)
-    body = le32(client_caps()) + le32(16777215) + bytes([45]) + zeros(23) + bytes(cfg.user) + b"\x00" + bytes([len(auth)]) + auth + bytes(cfg.database) + b"\x00" + bytes("mysql_native_password") + b"\x00"
+    body = le32(client_caps()) +
+        le32(16777215) +
+        bytes([45]) +
+        zeros(23) +
+        bytes(cfg.user) +
+        b"\x00" +
+        bytes([len(auth)]) +
+        auth +
+        bytes(cfg.database) +
+        b"\x00" +
+        bytes("mysql_native_password") +
+        b"\x00"
     write_packet(sock, seq, body)
 }
 
@@ -117,14 +126,21 @@ fn handshake(sock, cfg) {
     marker = reply.payload[0]
     if marker == 255 { error({ kind: "mysql", message: err_message(reply.payload) }) }
     # 0x00 = OK (authenticated). Anything else (e.g. auth switch) is unsupported.
-    if marker != 0 { error({ kind: "mysql", message: "unsupported auth handshake (marker " + string(marker) + ")" }) }
+    if marker != 0 {
+        error(
+            {
+                kind: "mysql",
+                message: "unsupported auth handshake (marker " + string(marker) + ")",
+            },
+        )
+    }
     sock
 }
 
 # connect({ host, port, user, password, database }) -> a connection handle.
-fn connect(cfg) = handshake(net.connect(cfg.host, cfg.port), cfg)
-fn connect_tls(cfg) = handshake(net.connect_tls(cfg.host, cfg.port), cfg)
-fn close(sock) = net.close(sock)
+export fn connect(cfg) = handshake(net.connect(cfg.host, cfg.port), cfg)
+export fn connect_tls(cfg) = handshake(net.connect_tls(cfg.host, cfg.port), cfg)
+export fn close(sock) = net.close(sock)
 
 # --- COM_QUERY (0x03) + result set -----------------------------------------
 
@@ -160,7 +176,7 @@ fn parse_row(payload, cols) {
 }
 
 # query(sock, sql) -> a list of row maps (empty for non-SELECT statements).
-fn query(sock, sql) {
+export fn query(sock, sql) {
     write_packet(sock, 0, bytes([3]) + bytes(sql))
     first = read_packet(sock)
     marker = first.payload[0]
@@ -182,7 +198,11 @@ fn query(sock, sql) {
         mut done = false
         while done == false {
             pkt = read_packet(sock)
-            if pkt.payload[0] == 254 and len(pkt.payload) < 9 { done = true } else { rows = push(rows, parse_row(pkt.payload, cols)) }
+            if pkt.payload[0] == 254 and len(pkt.payload) < 9 {
+                done = true
+            } else {
+                rows = push(rows, parse_row(pkt.payload, cols))
+            }
         }
         rows
     }
