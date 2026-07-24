@@ -25,7 +25,7 @@ the client needs:
   "dependencies": {
     "mysql": {
       "path": "github.com/ecko-sh/mysql-client",
-      "version": "v0.1.1",
+      "version": "v0.9.1",
       "grant": ["net"]
     }
   }
