@@ -14,8 +14,14 @@ version = get(main.query(db, "select version() as v")[0], "v")
 print("server -> " + version)
 
 main.query(db, "drop table if exists ecko_example")
-main.query(db, "create table ecko_example (id int primary key auto_increment, name varchar(50), score int)")
-main.query(db, "insert into ecko_example (name, score) values ('ada', 100), ('grace', 95), ('linus', 88)")
+main.query(
+    db,
+    "create table ecko_example (id int primary key auto_increment, name varchar(50), score int)",
+)
+main.query(
+    db,
+    "insert into ecko_example (name, score) values ('ada', 100), ('grace', 95), ('linus', 88)",
+)
 
 rows = main.query(db, "select name, score from ecko_example order by score desc")
 print("top scores:")

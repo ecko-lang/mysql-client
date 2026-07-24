@@ -1,6 +1,6 @@
-# MySQL Client
+# MySQL Client - Ecko Std Lib Package
 
-A MySQL / MariaDB client for [Ecko](https://ecko.sh), written in pure Ecko
+A MySQL / MariaDB client for [Ecko](https://ecko.sh), written in Ecko
 with no native client library. It speaks the classic protocol over `std.net`'s
 raw sockets and implements `mysql_native_password` authentication (the SHA-1
 scramble) using `std.hash`, `bytes`, and the bitwise operators.
@@ -8,21 +8,32 @@ scramble) using `std.hash`, `bytes`, and the bitwise operators.
 ## Install
 
 ```bash
-ecko add https://github.com/ecko-sh/mysql-client
+ecko get github.com/ecko-sh/mysql-client
 ```
 
-`ecko add` vendors the package into `./vendor/mysql/` and pins it by SHA-256 in
-`ecko.lock`. Grant it the network capability in your `ecko.json`:
+`ecko get` vendors the package under
+`./vendor/github.com/ecko-sh/mysql-client/` and pins a file-tree hash in
+`ecko.sum`.
+
+`ecko get` records this dependency under the alias `mysql-client`, which
+isn't a valid import name (hyphens aren't allowed in Ecko identifiers). Alias
+it to `mysql` in your `ecko.json` - this also grants the network capability
+the client needs:
 
 ```json
 {
   "dependencies": {
     "mysql": {
-      "source": "https://github.com/ecko-sh/mysql-client",
+      "path": "github.com/ecko-sh/mysql-client",
+      "version": "v0.1.1",
       "grant": ["net"]
     }
   }
 }
+```
+
+```ecko
+import mysql
 ```
 
 ## Use

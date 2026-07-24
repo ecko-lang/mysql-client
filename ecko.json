@@ -1,5 +1,5 @@
 {
-  "name": "mysql",
+  "module": "github.com/ecko-sh/mysql-client",
   "version": "0.1.1",
   "entrypoint": "main.ecko",
   "description": "A MySQL/MariaDB client written in Ecko: classic protocol + mysql_native_password over std.net.",
