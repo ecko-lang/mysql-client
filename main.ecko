@@ -68,7 +68,7 @@ fn err_message(payload) {
 
 # --- the initial handshake + auth ------------------------------------------
 
-# mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
+## mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
 export fn native_password(password, scramble) {
     h1 = hash.sha1_bytes(bytes(password))
     h2 = hash.sha1_bytes(h1)
@@ -137,9 +137,12 @@ fn handshake(sock, cfg) {
     sock
 }
 
-# connect({ host, port, user, password, database }) -> a connection handle.
+## connect({ host, port, user, password, database }) -> a connection handle.
 export fn connect(cfg) = handshake(net.connect(cfg.host, cfg.port), cfg)
+## Connect to MySQL over TLS and complete authentication. Same `cfg` as
+## `connect`. Needs the `net` capability.
 export fn connect_tls(cfg) = handshake(net.connect_tls(cfg.host, cfg.port), cfg)
+## Close the connection.
 export fn close(sock) = net.close(sock)
 
 # --- COM_QUERY (0x03) + result set -----------------------------------------
@@ -175,7 +178,7 @@ fn parse_row(payload, cols) {
     row
 }
 
-# query(sock, sql) -> a list of row maps (empty for non-SELECT statements).
+## query(sock, sql) -> a list of row maps (empty for non-SELECT statements).
 export fn query(sock, sql) {
     write_packet(sock, 0, bytes([3]) + bytes(sql))
     first = read_packet(sock)
