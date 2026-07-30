@@ -8,11 +8,11 @@ scramble) using `std.hash`, `bytes`, and the bitwise operators.
 ## Install
 
 ```bash
-ecko get github.com/ecko-sh/mysql-client
+ecko get github.com/ecko-lang/mysql-client
 ```
 
 `ecko get` vendors the package under
-`./vendor/github.com/ecko-sh/mysql-client/` and pins a file-tree hash in
+`./vendor/github.com/ecko-lang/mysql-client/` and pins a file-tree hash in
 `ecko.sum`.
 
 `ecko get` records this dependency under the alias `mysql-client`, which
@@ -24,8 +24,8 @@ the client needs:
 {
   "dependencies": {
     "mysql": {
-      "path": "github.com/ecko-sh/mysql-client",
-      "version": "v0.9.1",
+      "path": "github.com/ecko-lang/mysql-client",
+      "version": "v0.9.5",
       "grant": ["net"]
     }
   }
