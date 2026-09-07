@@ -6,6 +6,7 @@
 # declares its public API.
 
 import std.net
+import std.io
 import std.hash
 
 # --- little-endian integers (MySQL is little-endian) -----------------------
@@ -49,16 +50,26 @@ fn read_lenenc_str(b, off) {
 
 # --- packet framing: 3-byte LE length + 1-byte sequence + payload ----------
 
+# `io.read_exact` answers null when the peer closed with nothing pending, where
+# the old `net.recv_exact` raised. A server that goes away between packets is
+# ordinary - `wait_timeout` does it - so the null becomes the error it used to
+# be here, rather than an index into null further down.
+fn read_exact_or_fail(sock, n) {
+    b = io.read_exact(sock, n)
+    if is_null(b) { error({ kind: "mysql", message: "the server closed the connection" }) }
+    b
+}
+
 fn read_packet(sock) {
-    header = net.recv_exact(sock, 4)
+    header = read_exact_or_fail(sock, 4)
     length = header[0] bor header[1] shl 8 bor header[2] shl 16
-    payload = if length > 0 { net.recv_exact(sock, length) } else { b"" }
+    payload = if length > 0 { read_exact_or_fail(sock, length) } else { b"" }
     { seq: header[3], payload: payload }
 }
 
 fn write_packet(sock, seq, payload) {
     n = len(payload)
-    net.send(sock, bytes([n band 255, n shr 8 band 255, n shr 16 band 255, seq]) + payload)
+    io.write(sock, bytes([n band 255, n shr 8 band 255, n shr 16 band 255, seq]) + payload)
 }
 
 # An ERR packet (0xFF): 2-byte code, '#' + 5-byte SQLSTATE, then the message.
@@ -143,7 +154,7 @@ export fn connect(cfg) = handshake(net.connect(cfg.host, cfg.port), cfg)
 ## `connect`. Needs the `net` capability.
 export fn connect_tls(cfg) = handshake(net.connect_tls(cfg.host, cfg.port), cfg)
 ## Close the connection.
-export fn close(sock) = net.close(sock)
+export fn close(sock) = io.close(sock)
 
 # --- COM_QUERY (0x03) + result set -----------------------------------------
 
