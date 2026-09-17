@@ -50,10 +50,10 @@ fn read_lenenc_str(b, off) {
 
 # --- packet framing: 3-byte LE length + 1-byte sequence + payload ----------
 
-# `io.read_exact` answers null when the peer closed with nothing pending, where
-# the old `net.recv_exact` raised. A server that goes away between packets is
-# ordinary - `wait_timeout` does it - so the null becomes the error it used to
-# be here, rather than an index into null further down.
+# `io.read_exact` answers null when the peer closed with nothing pending. A
+# server that goes away between packets is ordinary - `wait_timeout` does it -
+# so that null is turned into an error here, rather than being indexed into
+# further down.
 fn read_exact_or_fail(sock, n) {
     b = io.read_exact(sock, n)
     if is_null(b) { error({ kind: "mysql", message: "the server closed the connection" }) }

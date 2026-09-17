@@ -36,7 +36,7 @@ the client needs:
 import mysql
 ```
 
-## Use
+## Usage
 
 ```ecko
 import mysql
