@@ -1,13 +1,65 @@
 # Offline tests, run by `ecko test` (no server needed). The full wire protocol
 # is exercised by example.ecko against a live server; here we lock down the
-# auth scramble, which doesn't need a socket.
+# auth scramble and parameter binding, neither of which needs a socket.
 import std.test
 import std.encoding
-import "./main.ecko"
+import std.math
+import "./auth.ecko"
+import "./bind.ecko"
 
 test.case("mysql_native_password matches a known vector", fn() {
     # scramble = bytes 0x00..0x13; SHA1(pw) ^ SHA1(scramble + SHA1(SHA1(pw))).
     scramble = encoding.base64_decode("AAECAwQFBgcICQoLDA0ODxAREhM=")
-    resp = main.native_password("secret", scramble)
+    resp = auth.native_password("secret", scramble)
     test.eq(encoding.hex_encode(resp), "21b3ff405f32cbe4aafff291396046ea29fa3a4d")
+})
+
+# --- parameter binding ---------------------------------------------------------
+#
+# query(sock, sql, params) fills each `?` from params. A string goes in as a
+# hex literal with a charset introducer, so it holds no quote or backslash to
+# escape - nothing in a value can end the literal, whatever the server's SQL
+# mode or the connection's charset.
+
+test.case("a number fills its placeholder as a literal", fn() {
+    test.eq(bind.bind("SELECT * FROM t WHERE id = ?", [5]), "SELECT * FROM t WHERE id = 5")
+    test.eq(bind.bind("SELECT ?, ?", [1.5, 12.50m]), "SELECT 1.5, 12.50")
+})
+
+test.case("a string is a hex literal, so it cannot break out of its quotes", fn() {
+    test.eq(bind.bind("SELECT ?", ["O'Brien"]), "SELECT _utf8mb4 X'4f27427269656e'")
+    attack = bind.bind("SELECT * FROM users WHERE name = ?", ["x' OR '1'='1"])
+    test.ok(not contains(attack, "'1'='1"), "the payload stays inside the literal: {attack}")
+    test.eq(attack, "SELECT * FROM users WHERE name = _utf8mb4 X'7827204f52202731273d2731'")
+    test.eq(bind.bind("SELECT ?", ["back\\slash"]), "SELECT _utf8mb4 X'6261636b5c736c617368'")
+    test.eq(bind.bind("SELECT ?", [""]), "SELECT _utf8mb4 X''")
+})
+
+test.case("null, booleans and bytes have their own literals", fn() {
+    test.eq(
+        bind.bind("VALUES (?, ?, ?, ?)", [null, true, false, b"\x00\x01"]),
+        "VALUES (NULL, TRUE, FALSE, X'0001')",
+    )
+})
+
+test.case("a placeholder inside quotes, backticks or a comment is left alone", fn() {
+    sql = "SELECT '?', \"?\", `a?b`, ? -- ?\n, ? # ?\n /* ? */"
+    test.eq(bind.bind(sql, [1, 2]), "SELECT '?', \"?\", `a?b`, 1 -- ?\n, 2 # ?\n /* ? */")
+    test.eq(bind.bind("SELECT 'it''s ?', ?", [3]), "SELECT 'it''s ?', 3")
+    test.eq(bind.bind("SELECT 'a\\'?', ?", [4]), "SELECT 'a\\'?', 4")
+})
+
+test.case("the number of params must match the placeholders", fn() {
+    test.eq(try { bind.bind("SELECT ?, ?", [1]) } catch (e) { get(e, "kind") }, "mysql")
+    test.eq(try { bind.bind("SELECT ?", [1, 2]) } catch (e) { get(e, "kind") }, "mysql")
+})
+
+test.case("a value with no SQL literal is refused", fn() {
+    test.eq(try { bind.bind("SELECT ?", [[1, 2]]) } catch (e) { get(e, "kind") }, "mysql")
+    test.eq(try { bind.bind("SELECT ?", [{ a: 1 }]) } catch (e) { get(e, "kind") }, "mysql")
+    test.eq(try { bind.bind("SELECT ?", [math.sqrt(-1.0)]) } catch (e) { get(e, "kind") }, "mysql")
+})
+
+test.case("with no params the SQL is sent exactly as written", fn() {
+    test.eq(bind.bind("SELECT '?' AS q, 1", []), "SELECT '?' AS q, 1")
 })

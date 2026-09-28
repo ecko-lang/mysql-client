@@ -7,7 +7,8 @@
 
 import std.net
 import std.io
-import std.hash
+import "./auth.ecko"
+import "./bind.ecko"
 
 # --- little-endian integers (MySQL is little-endian) -----------------------
 
@@ -79,14 +80,6 @@ fn err_message(payload) {
 
 # --- the initial handshake + auth ------------------------------------------
 
-## mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
-export fn native_password(password, scramble) {
-    h1 = hash.sha1_bytes(bytes(password))
-    h2 = hash.sha1_bytes(h1)
-    h3 = hash.sha1_bytes(scramble + h2)
-    h1 bxor h3
-}
-
 # Parse the server's Initial Handshake (v10) into { scramble, plugin }.
 fn parse_handshake(payload) {
     # payload[0] = protocol version (10); then null-terminated server version.
@@ -113,15 +106,15 @@ fn parse_handshake(payload) {
 fn client_caps() = 1 bor 8 bor 512 bor 32768 bor 524288 bor 16777216
 
 fn send_handshake_response(sock, seq, cfg, scramble) {
-    auth = native_password(cfg.password, scramble)
+    token = auth.native_password(cfg.password, scramble)
     body = le32(client_caps()) +
         le32(16777215) +
         bytes([45]) +
         zeros(23) +
         bytes(cfg.user) +
         b"\x00" +
-        bytes([len(auth)]) +
-        auth +
+        bytes([len(token)]) +
+        token +
         bytes(cfg.database) +
         b"\x00" +
         bytes("mysql_native_password") +
@@ -189,9 +182,12 @@ fn parse_row(payload, cols) {
     row
 }
 
-## query(sock, sql) -> a list of row maps (empty for non-SELECT statements).
-export fn query(sock, sql) {
-    write_packet(sock, 0, bytes([3]) + bytes(sql))
+## query(sock, sql, params = []) -> a list of row maps (empty for non-SELECT
+## statements). Each `?` in `sql` takes the next value of `params`, written as a
+## SQL literal that nothing in the value can break out of - pass user input
+## here rather than building it into the SQL string.
+export fn query(sock, sql, params = []) {
+    write_packet(sock, 0, bytes([3]) + bytes(bind.bind(sql, params)))
     first = read_packet(sock)
     marker = first.payload[0]
     if marker == 255 { error({ kind: "mysql", message: err_message(first.payload) }) }

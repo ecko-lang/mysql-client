@@ -1,0 +1,101 @@
+# Parameter binding for query(sock, sql, params). Internal to the package:
+# main.ecko calls it, and the offline test imports this file directly.
+#
+# Each `?` outside a quoted string, a backtick identifier or a comment takes the
+# next value as a SQL literal. A string is written as a hex literal with a
+# charset introducer - `_utf8mb4 X'4f27...'` - so it contains no quote and no
+# backslash: nothing in the value can end the literal, whatever the server's
+# SQL mode (NO_BACKSLASH_ESCAPES changes what a backslash means) or the
+# connection's charset. The column's own collation still decides comparisons,
+# because an introduced literal is only coercible.
+
+import std.encoding
+import std.math
+
+fn fail(message) {
+    error({ kind: "mysql", message: message })
+}
+
+## The SQL literal for one parameter value.
+export fn literal(v) {
+    match type_of(v) {
+        "null" => "NULL"
+        "bool" => if v { "TRUE" } else { "FALSE" }
+        "int" => string(v)
+        "decimal" => string(v)
+        "float" => {
+            unless math.isfinite(v) {
+                fail("query parameter {v} has no SQL literal (NaN or infinite)")
+            }
+            string(v)
+        }
+        "string" => "_utf8mb4 X'{encoding.hex_encode(bytes(v))}'"
+        "bytes" => "X'{encoding.hex_encode(v)}'"
+        other => fail("a query parameter must be a string, number, bool, bytes or null, not {other}")
+    }
+}
+
+## `sql` with each placeholder filled from `params`, in order. With no params
+## the SQL is returned exactly as written. The count must match.
+export fn bind(sql, params) {
+    if len(params) == 0 { return sql }
+    cs = chars(sql)
+    n = len(cs)
+    mut out = ""
+    mut next = 0
+    mut i = 0
+    while i < n {
+        c = cs[i]
+        if c == "'" or c == "\"" or c == "`" {
+            # A quoted run, copied as is. Inside a string a doubled quote or a
+            # backslash escapes the next character; backticks double only.
+            mut j = i + 1
+            mut closed = false
+            while j < n and not closed {
+                if cs[j] == "\\" and c != "`" {
+                    j = j + 2
+                } else if cs[j] == c and j + 1 < n and cs[j + 1] == c {
+                    j = j + 2
+                } else if cs[j] == c {
+                    closed = true
+                    j = j + 1
+                } else {
+                    j = j + 1
+                }
+            }
+            out = out + join(slice(cs, i, min([j, n])), "")
+            i = j
+        } else if c == "#" or c == "-" and i + 2 < n and cs[i + 1] == "-" and (cs[i + 2] == " " or cs[i + 2] == "\t") {
+            # A line comment, to the end of the line.
+            mut j = i
+            while j < n and cs[j] != "\n" {
+                j = j + 1
+            }
+            out = out + join(slice(cs, i, j), "")
+            i = j
+        } else if c == "/" and i + 1 < n and cs[i + 1] == "*" {
+            # A block comment, to its close.
+            mut j = i + 2
+            while j + 1 < n and not (cs[j] == "*" and cs[j + 1] == "/") {
+                j = j + 1
+            }
+            end = min([j + 2, n])
+            out = out + join(slice(cs, i, end), "")
+            i = end
+        } else if c == "?" {
+            if next >= len(params) {
+                fail("the SQL has more ? placeholders than the {len(params)} params given")
+            }
+            out = out + literal(params[next])
+            next = next + 1
+            i = i + 1
+        } else {
+            out = out + c
+            i = i + 1
+        }
+    }
+    if next != len(params) {
+        fail("{len(params)} params given but the SQL has {next} ? placeholders")
+    }
+    out
+}

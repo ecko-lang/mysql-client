@@ -18,10 +18,10 @@ main.query(
     db,
     "create table ecko_example (id int primary key auto_increment, name varchar(50), score int)",
 )
-main.query(
-    db,
-    "insert into ecko_example (name, score) values ('ada', 100), ('grace', 95), ('linus', 88)",
-)
+# Values go in as params, never built into the SQL string.
+for (name, score) in [["ada", 100], ["grace", 95], ["linus", 88]] {
+    main.query(db, "insert into ecko_example (name, score) values (?, ?)", [name, score])
+}
 
 rows = main.query(db, "select name, score from ecko_example order by score desc")
 print("top scores:")

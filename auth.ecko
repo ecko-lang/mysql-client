@@ -1,0 +1,13 @@
+# The mysql_native_password scramble. Internal to the package: main.ecko uses
+# it to authenticate and does not re-export it, and the offline test imports
+# this file directly.
+
+import std.hash
+
+## mysql_native_password: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
+export fn native_password(password, scramble) {
+    h1 = hash.sha1_bytes(bytes(password))
+    h2 = hash.sha1_bytes(h1)
+    h3 = hash.sha1_bytes(scramble + h2)
+    h1 bxor h3
+}

@@ -60,17 +60,29 @@ mysql.close(db)
 |----------|-------|
 | `connect({host, port, user, password, database})` | open a connection and authenticate (mysql_native_password) |
 | `connect_tls({...})` | same, over TLS |
-| `query(db, sql)` | run a statement; returns a list of row maps (empty for non-SELECT) |
+| `query(db, sql, params = [])` | run a statement, filling each `?` from `params`; returns a list of row maps (empty for non-SELECT) |
 | `close(db)` | close the connection |
-| `native_password(password, scramble)` | the auth scramble on its own, used by the offline test |
 
 Values come back in text format: integers, dates, etc. arrive as strings, and
 SQL `NULL` comes back as `null`. Column names are the map keys.
 
 > **Scope.** Authentication is `mysql_native_password` (the MySQL 5.7 / MariaDB
 > default, also available on MySQL 8 for users created with it). `caching_sha2_password`
-> (the MySQL 8 default) and the extended/prepared protocol are planned. Statements
-> are sent as text (simple protocol), so quote and escape untrusted input yourself.
+> (the MySQL 8 default) and the server-side prepared protocol are planned.
+
+**Pass values as `params`, never by building SQL.** Each `?` outside a quoted
+string, a backtick identifier or a comment takes the next value:
+
+```ecko fragment
+mysql.query(db, "SELECT * FROM users WHERE email = ? AND active = ?", [email, true])
+```
+
+A string goes in as a hex literal with a charset introducer (`_utf8mb4 X'...'`),
+so it contains no quote or backslash - nothing in the value can end the literal,
+whatever the server's SQL mode or the connection's charset. Numbers, decimals,
+booleans, `null` and bytes get their SQL literals; a list, map or a NaN is
+refused with a `mysql` error, and so is a count of `params` that does not match
+the placeholders. With no `params` the SQL is sent exactly as written.
 
 ## Testing
 
