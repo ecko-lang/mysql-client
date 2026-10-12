@@ -8,24 +8,25 @@ scramble) using `std.hash`, `bytes`, and the bitwise operators.
 ## Install
 
 ```bash
-ecko get github.com/ecko-lang/mysql-client
+ecko get github.com/ecko-lang/mysql-client --as mysql
 ```
 
 `ecko get` vendors the package under
 `./vendor/github.com/ecko-lang/mysql-client/` and pins a file-tree hash in
 `ecko.sum`.
 
-`ecko get` records this dependency under the alias `mysql-client`, which
-isn't a valid import name (hyphens aren't allowed in Ecko identifiers). Alias
-it to `mysql` in your `ecko.json` - this also grants the network capability
-the client needs:
+Without `--as`, `ecko get` records this dependency under the alias
+`mysql_client` (the repo name with `-` mapped to `_`); `--as mysql` is what makes
+`import mysql` work. It writes the entry as
+`"mysql": "github.com/ecko-lang/mysql-client@0.38.0"`. Expand it to the map form in
+your `ecko.json` to grant the network capability the client needs:
 
 ```json
 {
   "dependencies": {
     "mysql": {
       "path": "github.com/ecko-lang/mysql-client",
-      "version": "v0.9.5",
+      "version": "0.38.0",
       "grant": ["net"]
     }
   }
@@ -48,7 +49,7 @@ db = mysql.connect({
 
 rows = mysql.query(db, "select id, name from users order by id")
 for r in rows {                         # rows are maps keyed by column name
-    print(get(r, "id") + ": " + get(r, "name"))
+    print("{r.id}: {r.name}")
 }
 
 mysql.close(db)
