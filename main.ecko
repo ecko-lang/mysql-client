@@ -9,6 +9,7 @@ import std.net
 import std.io
 import "./auth.ecko"
 import "./bind.ecko"
+import "./tx.ecko"
 
 # --- little-endian integers (MySQL is little-endian) -----------------------
 
@@ -57,7 +58,7 @@ fn read_lenenc_str(b, off) {
 # further down.
 fn read_exact_or_fail(sock, n) {
     b = io.read_exact(sock, n)
-    if is_null(b) { error({ kind: "mysql", message: "the server closed the connection" }) }
+    if is_null(b) { bind.fail("the server closed the connection") }
     b
 }
 
@@ -73,9 +74,18 @@ fn write_packet(sock, seq, payload) {
     io.write(sock, bytes([n band 255, n shr 8 band 255, n shr 16 band 255, seq]) + payload)
 }
 
-# An ERR packet (0xFF): 2-byte code, '#' + 5-byte SQLSTATE, then the message.
-fn err_message(payload) {
-    if len(payload) > 9 { string(payload[9..len(payload)]) } else { "mysql error" }
+# An ERR packet (0xFF): 2-byte error number, '#' + 5-byte SQLSTATE, then the
+# message. Raised with both codes: `code` is the SQLSTATE, the same field the
+# Postgres client fills, and `errno` the MySQL number (1062 is a duplicate key).
+fn server_error(payload) {
+    errno = if len(payload) >= 3 { read_le16(payload, 1) } else { 0 }
+    if len(payload) > 9 and payload[3] == 35 {
+        bind.fail(string(payload[9..len(payload)]), { code: string(payload[4..9]), errno: errno })
+    }
+    bind.fail(
+        if len(payload) > 3 { string(payload[3..len(payload)]) } else { "mysql error" },
+        { errno: errno },
+    )
 }
 
 # --- the initial handshake + auth ------------------------------------------
@@ -128,16 +138,9 @@ fn handshake(sock, cfg) {
     send_handshake_response(sock, hs.seq + 1, cfg, info.scramble)
     reply = read_packet(sock)
     marker = reply.payload[0]
-    if marker == 255 { error({ kind: "mysql", message: err_message(reply.payload) }) }
+    if marker == 255 { server_error(reply.payload) }
     # 0x00 = OK (authenticated). Anything else (e.g. auth switch) is unsupported.
-    if marker != 0 {
-        error(
-            {
-                kind: "mysql",
-                message: "unsupported auth handshake (marker " + string(marker) + ")",
-            },
-        )
-    }
+    if marker != 0 { bind.fail("unsupported auth handshake (marker " + string(marker) + ")") }
     sock
 }
 
@@ -185,12 +188,13 @@ fn parse_row(payload, cols) {
 ## query(sock, sql, params = []) -> a list of row maps (empty for non-SELECT
 ## statements). Each `?` in `sql` takes the next value of `params`, written as a
 ## SQL literal that nothing in the value can break out of - pass user input
-## here rather than building it into the SQL string.
+## here rather than building it into the SQL string. A `sql { }` block works in
+## place of the string and the list.
 export fn query(sock, sql, params = []) {
-    write_packet(sock, 0, bytes([3]) + bytes(bind.bind(sql, params)))
+    write_packet(sock, 0, bytes([3]) + bytes(bind.statement(sql, params)))
     first = read_packet(sock)
     marker = first.payload[0]
-    if marker == 255 { error({ kind: "mysql", message: err_message(first.payload) }) }
+    if marker == 255 { server_error(first.payload) }
     if marker == 0 {
         # OK packet: no result set (INSERT/UPDATE/DDL).
         []
@@ -208,6 +212,9 @@ export fn query(sock, sql, params = []) {
         mut done = false
         while done == false {
             pkt = read_packet(sock)
+            # An ERR packet can end a result set early (a killed query); read
+            # as a row it would be garbage.
+            if pkt.payload[0] == 255 { server_error(pkt.payload) }
             if pkt.payload[0] == 254 and len(pkt.payload) < 9 {
                 done = true
             } else {
@@ -216,4 +223,38 @@ export fn query(sock, sql, params = []) {
         }
         rows
     }
+}
+
+# --- transactions ----------------------------------------------------------
+
+# Run a statement that answers with an OK packet, and return the server status
+# flags from it.
+fn ok_status(sock, text) {
+    write_packet(sock, 0, bytes([3]) + bytes(text))
+    reply = read_packet(sock).payload
+    if reply[0] == 255 { server_error(reply) }
+    if reply[0] != 0 { bind.fail("expected an OK reply to {text}") }
+    affected = read_lenenc(reply, 1)
+    insert_id = read_lenenc(reply, affected[1])
+    read_le16(reply, insert_id[1])
+}
+
+## transaction(db, fn) runs `fn(db)` inside a transaction: it commits when `fn`
+## returns, and rolls back and re-raises if `fn` raises. A commit that fails is
+## rolled back too, and raises. Returns what `fn` returned. Transactions do not
+## nest: starting one inside another raises.
+export fn transaction(sock, body) {
+    run = fn(step) {
+        if step == "BEGIN" {
+            # START TRANSACTION inside a transaction commits the outer one
+            # without a word, so check the in-transaction flag (bit 1) first.
+            if ok_status(sock, "DO 0") band 1 != 0 {
+                bind.fail(
+                    "a transaction is already open on this connection; transaction() does not nest",
+                )
+            }
+            ok_status(sock, "START TRANSACTION")
+        } else { ok_status(sock, step) }
+    }
+    tx.in_transaction(run, fn() body(sock))
 }

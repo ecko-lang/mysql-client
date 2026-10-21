@@ -1,11 +1,16 @@
 # Offline tests, run by `ecko test` (no server needed). The full wire protocol
 # is exercised by example.ecko against a live server; here we lock down the
-# auth scramble and parameter binding, neither of which needs a socket.
+# auth scramble, parameter binding and the transaction protocol, partly
+# against a scripted loopback server.
 import std.test
 import std.encoding
+import std.io
 import std.math
+import std.net
 import "./auth.ecko"
 import "./bind.ecko"
+import "./tx.ecko"
+import "./main.ecko"
 
 test.case("mysql_native_password matches a known vector", fn() {
     # scramble = bytes 0x00..0x13; SHA1(pw) ^ SHA1(scramble + SHA1(SHA1(pw))).
@@ -50,16 +55,174 @@ test.case("a placeholder inside quotes, backticks or a comment is left alone", f
 })
 
 test.case("the number of params must match the placeholders", fn() {
-    test.eq(try { bind.bind("SELECT ?, ?", [1]) } catch (e) { get(e, "kind") }, "mysql")
-    test.eq(try { bind.bind("SELECT ?", [1, 2]) } catch (e) { get(e, "kind") }, "mysql")
+    test.eq(try { bind.bind("SELECT ?, ?", [1]) } catch (e) { get(e, "kind") }, "sql")
+    test.eq(try { bind.bind("SELECT ?", [1, 2]) } catch (e) { get(e, "kind") }, "sql")
 })
 
 test.case("a value with no SQL literal is refused", fn() {
-    test.eq(try { bind.bind("SELECT ?", [[1, 2]]) } catch (e) { get(e, "kind") }, "mysql")
-    test.eq(try { bind.bind("SELECT ?", [{ a: 1 }]) } catch (e) { get(e, "kind") }, "mysql")
-    test.eq(try { bind.bind("SELECT ?", [math.sqrt(-1.0)]) } catch (e) { get(e, "kind") }, "mysql")
+    test.eq(try { bind.bind("SELECT ?", [[1, 2]]) } catch (e) { get(e, "kind") }, "sql")
+    test.eq(try { bind.bind("SELECT ?", [{ a: 1 }]) } catch (e) { get(e, "kind") }, "sql")
+    test.eq(try { bind.bind("SELECT ?", [math.sqrt(-1.0)]) } catch (e) { get(e, "kind") }, "sql")
 })
 
 test.case("with no params the SQL is sent exactly as written", fn() {
     test.eq(bind.bind("SELECT '?' AS q, 1", []), "SELECT '?' AS q, 1")
+})
+
+# --- one error kind across the SQL drivers ----------------------------------
+#
+# Every failure is `kind: "sql"`, the kind std.sql raises, with
+# `driver: "mysql"`. It used to be `kind: "mysql"`.
+
+fn caught(f) {
+    try {
+        f()
+        null
+    } catch (e) { e }
+}
+
+test.case("errors are kind sql, with the driver named", fn() {
+    e = caught(fn() bind.bind("SELECT ?, ?", [1]))
+    test.eq([e.kind, e.driver], ["sql", "mysql"])
+})
+
+# --- sql { } blocks ------------------------------------------------------------
+
+test.case("a sql block binds its holes like a params list", fn() {
+    name = "O'Brien"
+    got = bind.statement(sql { SELECT * FROM users WHERE name = {name} AND id > {3} }, [])
+    test.eq(got, "SELECT * FROM users WHERE name = _utf8mb4 X'4f27427269656e' AND id > 3")
+})
+
+test.case("a string and a params list work as before", fn() {
+    test.eq(bind.statement("SELECT ?", [1]), "SELECT 1")
+})
+
+test.case("a sql block with a separate params list is refused", fn() {
+    x = 1
+    e = caught(fn() bind.statement(sql { SELECT {x} }, [2]))
+    test.eq([e.kind, e.driver], ["sql", "mysql"])
+    test.ok(contains(e.message, "carries its own"), e.message)
+})
+
+test.case("something that is neither a string nor a block is refused", fn() {
+    e = caught(fn() bind.statement(42, []))
+    test.eq(e.kind, "sql")
+})
+
+# --- transactions ----------------------------------------------------------------
+#
+# transaction(db, fn) behaves like std.sql's: commit when fn returns, roll back
+# and re-raise if it raises, roll back if the commit fails.
+
+test.case("a transaction commits and returns what the function returned", fn() {
+    log = cell([])
+    got = tx.in_transaction(fn(t) cell_update(log, fn(l) push(l, t)), fn() 42)
+    test.eq(got, 42)
+    test.eq(cell_get(log), ["BEGIN", "COMMIT"])
+})
+
+test.case("a transaction rolls back and re-raises the function's own error", fn() {
+    log = cell([])
+    e = caught(
+        fn() tx.in_transaction(
+            fn(t) cell_update(log, fn(l) push(l, t)),
+            fn() error({ kind: "app", message: "no" }),
+        ),
+    )
+    test.eq(e, { kind: "app", message: "no" })
+    test.eq(cell_get(log), ["BEGIN", "ROLLBACK"])
+})
+
+test.case("a commit that fails is rolled back, and its error is the one raised", fn() {
+    log = cell([])
+    run = fn(t) {
+        cell_update(log, fn(l) push(l, t))
+        if t == "COMMIT" { error({ kind: "sql", driver: "mysql", message: "deadlock" }) }
+    }
+    e = caught(fn() tx.in_transaction(run, fn() 1))
+    test.eq(e.message, "deadlock")
+    test.eq(cell_get(log), ["BEGIN", "COMMIT", "ROLLBACK"])
+})
+
+# --- against a scripted server --------------------------------------------------
+#
+# A loopback listener that answers each COM_QUERY with canned packets, the exact
+# bytes a server sends, and returns the statements it received.
+
+fn le16(n) = bytes([n band 255, n shr 8 band 255])
+fn packet(seq, payload) {
+    n = len(payload)
+    bytes([n band 255, n shr 8 band 255, n shr 16 band 255, seq]) + payload
+}
+fn lenenc(s) = bytes([len(bytes(s))]) + bytes(s)
+
+# OK, with the server status flags. Bit 1 (SERVER_STATUS_IN_TRANS) is set
+# while a transaction is open.
+fn ok(status = 2) = packet(1, b"\x00\x00\x00" + le16(status) + le16(0))
+fn err(errno, state, text) = packet(1, b"\xff" + le16(errno) + bytes("#" + state + text))
+fn column(name) = lenenc("def") + lenenc("") + lenenc("") + lenenc("") + lenenc(name) + lenenc(name)
+
+async fn scripted(listener, replies) {
+    conn = net.accept(listener, 5000)
+    mut seen = []
+    for reply in replies {
+        header = io.read_exact(conn, 4)
+        n = header[0] bor header[1] shl 8 bor header[2] shl 16
+        body = io.read_exact(conn, n)
+        seen = push(seen, string(body[1..len(body)]))
+        io.write(conn, reply)
+    }
+    io.close(conn)
+    net.stop(listener)
+    seen
+}
+
+fn with_server(replies, work) {
+    l = net.listen(0, "127.0.0.1")
+    server = scripted(l, replies)
+    sock = net.connect("127.0.0.1", net.port(l))
+    out = try { { value: work(sock) } } catch (e) { { error: e } }
+    io.close(sock)
+    insert(out, "seen", await server)
+}
+
+test.case("a server error carries its SQLSTATE and error number", fn() {
+    got = with_server(
+        [err(1062, "23000", "Duplicate entry 'a' for key 'email'")],
+        fn(db) main.query(db, "insert into users (email) values ('a')"),
+    )
+    test.eq(got.error.kind, "sql")
+    test.eq(got.error.driver, "mysql")
+    test.eq(got.error.code, "23000")
+    test.eq(got.error.errno, 1062)
+    test.eq(got.error.message, "Duplicate entry 'a' for key 'email'")
+})
+
+test.case("an error in the middle of a result set is raised, not read as a row", fn() {
+    rows = packet(1, b"\x01") + packet(2, column("x")) + packet(3, lenenc("1"))
+    killed = packet(4, b"\xff" + le16(1317) + bytes("#70100Query execution was interrupted"))
+    got = with_server([rows + killed], fn(db) main.query(db, "select x from t"))
+    test.eq(got.error.kind, "sql")
+    test.eq(got.error.errno, 1317)
+})
+
+test.case("a transaction over the wire checks, begins, works, then commits", fn() {
+    got = with_server([ok(2), ok(3), ok(3), ok(2)], fn(db) main.transaction(db, fn(t) {
+        main.query(t, "insert into t values (1)")
+        "done"
+    }))
+    test.eq(got.value, "done")
+    test.eq(got.seen, ["DO 0", "START TRANSACTION", "insert into t values (1)", "COMMIT"])
+})
+
+test.case("a nested transaction is refused, and the outer one rolls back", fn() {
+    # START TRANSACTION inside a transaction silently commits the outer one, so
+    # the in-transaction status flag is checked first.
+    got = with_server(
+        [ok(2), ok(3), ok(3), ok(2)],
+        fn(db) main.transaction(db, fn(t) main.transaction(t, fn(inner) 1)),
+    )
+    test.ok(contains(got.error.message, "does not nest"), got.error.message)
+    test.eq(got.seen, ["DO 0", "START TRANSACTION", "DO 0", "ROLLBACK"])
 })

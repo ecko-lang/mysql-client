@@ -18,7 +18,7 @@ ecko get github.com/ecko-lang/mysql-client --as mysql
 Without `--as`, `ecko get` records this dependency under the alias
 `mysql_client` (the repo name with `-` mapped to `_`); `--as mysql` is what makes
 `import mysql` work. It writes the entry as
-`"mysql": "github.com/ecko-lang/mysql-client@0.38.0"`. Expand it to the map form in
+`"mysql": "github.com/ecko-lang/mysql-client@0.39.0"`. Expand it to the map form in
 your `ecko.json` to grant the network capability the client needs:
 
 ```json
@@ -26,7 +26,7 @@ your `ecko.json` to grant the network capability the client needs:
   "dependencies": {
     "mysql": {
       "path": "github.com/ecko-lang/mysql-client",
-      "version": "0.38.0",
+      "version": "0.39.0",
       "grant": ["net"]
     }
   }
@@ -52,6 +52,16 @@ for r in rows {                         # rows are maps keyed by column name
     print("{r.id}: {r.name}")
 }
 
+# A sql { } block: every {hole} is a bound value.
+name = "Ada"
+mysql.query(db, sql { SELECT * FROM users WHERE name = {name} })
+
+# Commits when the function returns; rolls back if it raises.
+mysql.transaction(db, fn(tx) {
+    mysql.query(tx, "UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, 1])
+    mysql.query(tx, "UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, 2])
+})
+
 mysql.close(db)
 ```
 
@@ -62,6 +72,8 @@ mysql.close(db)
 | `connect({host, port, user, password, database})` | open a connection and authenticate (mysql_native_password) |
 | `connect_tls({...})` | same, over TLS |
 | `query(db, sql, params = [])` | run a statement, filling each `?` from `params`; returns a list of row maps (empty for non-SELECT) |
+| `query(db, sql { ... })` | a `sql { }` block; its holes are bound the same way |
+| `transaction(db, fn)` | run `fn(db)` in a transaction: commit on return, roll back and re-raise on error; returns what `fn` returned |
 | `close(db)` | close the connection |
 
 Values come back in text format: integers, dates, etc. arrive as strings, and
@@ -82,13 +94,52 @@ A string goes in as a hex literal with a charset introducer (`_utf8mb4 X'...'`),
 so it contains no quote or backslash - nothing in the value can end the literal,
 whatever the server's SQL mode or the connection's charset. Numbers, decimals,
 booleans, `null` and bytes get their SQL literals; a list, map or a NaN is
-refused with a `mysql` error, and so is a count of `params` that does not match
+refused with a `sql` error, and so is a count of `params` that does not match
 the placeholders. With no `params` the SQL is sent exactly as written.
+
+A `sql { }` block is the same `{ query, params }` value `std.sql` takes, and is
+bound the same way. Pass it on its own: it carries its params, so a separate
+list is refused.
+
+### Transactions
+
+`transaction(db, fn)` has the same shape as `std.sql`'s. It commits when `fn`
+returns and gives back its value. If `fn` raises, it rolls back and re-raises
+the same error. If the commit fails it rolls back and raises that error.
+
+Transactions do not nest. MySQL itself would let them, by silently committing
+the open transaction when a second one starts, so `transaction` checks first
+and raises instead. That check costs one extra round trip per transaction.
+
+## Errors
+
+Every failure is `{ kind: "sql", driver: "mysql", message }`, the kind
+`std.sql` raises, so one `catch` arm covers both. An error from the server also
+carries `code`, its SQLSTATE, and `errno`, the MySQL error number (`1062` is a
+duplicate key):
+
+```ecko fragment
+try {
+    mysql.query(db, "INSERT INTO users (email) VALUES (?)", [email])
+} catch (e) {
+    match e.kind {
+        "sql" => if get(e, "errno") == 1062 { print("already registered") } else { error(e) }
+        _ => error(e)
+    }
+}
+```
+
+An error the server sends partway through a result set, such as a killed query,
+is raised too, rather than read as a row.
+
+**Migration from 0.38:** errors used to be `kind: "mysql"`. Match `"sql"`
+instead, and check `e.driver` if you need to tell databases apart.
 
 ## Testing
 
 ```bash
-ecko test          # offline: checks the auth scramble against a known vector, no server needed
+ecko test          # offline: auth scramble, binding, blocks and transactions,
+                   # partly against a scripted loopback server
 ecko example.ecko  # live round trip against a MySQL/MariaDB server
 ```
 

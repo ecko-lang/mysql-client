@@ -1,0 +1,20 @@
+# The transaction protocol behind transaction(db, fn). Internal to the package:
+# main.ecko calls it, and the offline test imports this file directly to drive
+# it without a server.
+
+## Run `body()` between BEGIN and COMMIT, through `run(statement)`. Commits when
+## `body` returns and gives back its value. If `body` raises, rolls back and
+## re-raises the same error. If the commit fails, rolls back and raises that.
+## A failed rollback is not reported over the error that caused it.
+export fn in_transaction(run, body) {
+    run("BEGIN")
+    result = try { body() } catch (e) {
+        try { run("ROLLBACK") } catch (_) { null }
+        error(e)
+    }
+    try { run("COMMIT") } catch (e) {
+        try { run("ROLLBACK") } catch (_) { null }
+        error(e)
+    }
+    result
+}

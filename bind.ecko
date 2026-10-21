@@ -1,5 +1,6 @@
-# Parameter binding for query(sock, sql, params). Internal to the package:
-# main.ecko calls it, and the offline test imports this file directly.
+# Parameter binding for query(sock, sql, params), and the error the package
+# raises. Internal to the package: main.ecko calls it, and the offline test
+# imports this file directly.
 #
 # Each `?` outside a quoted string, a backtick identifier or a comment takes the
 # next value as a SQL literal. A string is written as a hex literal with a
@@ -12,8 +13,29 @@
 import std.encoding
 import std.math
 
-fn fail(message) {
-    error({ kind: "mysql", message: message })
+## The error this package raises: std.sql's `sql` kind, so one `catch` arm
+## covers every database, with `driver` naming this one. `extra` adds fields,
+## such as the server's `code` (SQLSTATE) and `errno`.
+export fn fail(message, extra = {}) {
+    mut e = { kind: "sql", driver: "mysql", message: message }
+    for (k, v) in extra {
+        e = insert(e, k, v)
+    }
+    error(e)
+}
+
+## The SQL text `query` sends, from either form it takes: a string with `?`
+## placeholders and a params list, or a `sql { }` block, which carries both.
+export fn statement(sql, params) {
+    t = type_of(sql)
+    if t == "string" { return bind(sql, params) }
+    if t != "map" or is_null(get(sql, "query")) {
+        fail("query takes a SQL string or a sql \{ } block, not {t}")
+    }
+    if len(params) > 0 {
+        fail("a sql \{ } block carries its own params; pass it alone, as query(db, sql \{ ... })")
+    }
+    bind(sql.query, sql.params)
 }
 
 ## The SQL literal for one parameter value.
